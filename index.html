@@ -399,9 +399,9 @@
 
         const packDiv = document.createElement('div');
         packDiv.className = 'pack-container';
-        
+
         let html = `<h3 class="pack-title">Pack #${num}</h3><div class="card-grid">`;
-        
+
         cards.forEach(c => {
             const foilClass = c.isFoil ? 'is-foil' : '';
             html += `
@@ -412,8 +412,17 @@
                 </div>
             `;
         });
-        
+
         html += `</div>`;
+
+        // Add card list below the grid
+        html += `<div style="margin-top:18px;">
+            <strong>Card List:</strong>
+            <ul style="columns:2;column-gap:30px;padding-left:18px;margin:8px 0 0 0;">
+                ${cards.map(c => `<li${c.isFoil ? ' style=\"color:gold;font-weight:bold;\"' : ''}>${c.name}${c.isFoil ? ' <span style=\"font-size:11px;\">(Foil)</span>' : ''}</li>`).join('')}
+            </ul>
+        </div>`;
+
         packDiv.innerHTML = html;
         container.appendChild(packDiv);
     }
