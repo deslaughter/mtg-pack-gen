@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MTG Pack Generator</title>
+    <style>
+        :root {
+            --bg-color: #1a1a1a;
+            --text-color: #e0e0e0;
+            --accent-color: #7289da;
+            --card-radius: 4.5%;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #333;
+        }
+
+        h1 { margin: 0 0 10px 0; }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+
+        select, input, button {
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #444;
+            background: #2a2a2a;
+            color: white;
+            font-size: 16px;
+        }
+
+        button {
+            background-color: var(--accent-color);
+            cursor: pointer;
+            font-weight: bold;
+            border: none;
+            transition: background 0.2s;
+        }
+
+        button:hover { background-color: #5b6eae; }
+        button:disabled { background-color: #444; cursor: not-allowed; }
+
+        #status {
+            text-align: center;
+            color: #aaa;
+            margin-bottom: 20px;
+            height: 20px;
+        }
+
+        /* Grid Layout */
+        .pack-container {
+            margin-bottom: 40px;
+            background: #222;
+            padding: 20px;
+            border-radius: 10px;
+        }
+
+        .pack-title {
+            margin-top: 0;
+            border-bottom: 1px solid #444;
+            padding-bottom: 10px;
+            color: var(--accent-color);
+        }
+
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .card-wrapper {
+            position: relative;
+            aspect-ratio: 2.5/3.5;
+            transition: transform 0.2s;
+        }
+
+        .card-wrapper:hover {
+            transform: scale(1.05);
+            z-index: 10;
+        }
+
+        .card-img {
+            width: 100%;
+            height: 100%;
+            border-radius: var(--card-radius);
+            object-fit: cover;
+            background: #111;
+        }
+
+        .foil-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            border-radius: var(--card-radius);
+            pointer-events: none;
+            background: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0) 50%, rgba(255,255,255,0.1) 100%);
+            border: 2px solid gold;
+            box-shadow: 0 0 10px rgba(255, 215, 0, 0.3);
+            display: none;
+        }
+
+        .is-foil .foil-overlay { display: block; }
+        
+        .card-name {
+            position: absolute;
+            bottom: 0;
+            width: 100%;
+            text-align: center;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            font-size: 12px;
+            padding: 2px 0;
+            display: none; /* Only show if image fails */
+        }
+
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>MTG Pack Generator</h1>
+    <p>Simulating Play Boosters with Print Run Collation</p>
+</header>
+
+<div class="controls">
+    <select id="setSelect">
+        <option value="" disabled selected>Loading sets...</option>
+    </select>
+    
+    <input type="number" id="packCount" value="1" min="1" max="36" placeholder="Packs">
+    
+    <button id="genBtn" onclick="startGeneration()">Open Packs</button>
+</div>
+
+<div id="status"></div>
+<div id="output"></div>
+
+<script>
+    const API_ROOT = "https://api.scryfall.com";
+    let currentSetCards = [];
+    
+    // On Load: Fetch Sets
+    window.onload = async () => {
+        const select = document.getElementById('setSelect');
+        try {
+            const resp = await fetch(`${API_ROOT}/sets`);
+            const json = await resp.json();
+            
+            // Filter for main expansions only to reduce clutter
+            const validTypes = ['expansion', 'core', 'masters', 'draft_innovation'];
+            const sets = json.data.filter(s => validTypes.includes(s.set_type) && s.card_count > 100);
+            
+            select.innerHTML = sets.map(s => `<option value="${s.code}">${s.name} (${s.code.toUpperCase()})</option>`).join('');
+            
+            // Set default to something modern if available
+            if(sets.find(s => s.code === 'mkm')) select.value = 'mkm';
+            else select.selectedIndex = 0;
+            
+        } catch (e) {
+            select.innerHTML = '<option>Error loading sets</option>';
+            console.error(e);
+        }
+    };
+
+    class Card {
+        constructor(data) {
+            this.name = data.name;
+            this.rarity = data.rarity;
+            this.typeLine = data.type_line;
+            this.colors = data.colors || [];
+            
+            // Handle image logic (normal vs transform cards)
+            if (data.image_uris) {
+                this.image = data.image_uris.normal;
+            } else if (data.card_faces && data.card_faces[0].image_uris) {
+                this.image = data.card_faces[0].image_uris.normal;
+            } else {
+                this.image = null; // Placeholder logic could go here
+            }
+        }
+    }
+
+    // Print Run Logic (Collation)
+    class PrintRun {
+        constructor(pool) {
+            this.pool = pool;
+            this.sequence = [];
+            this.refillAndBalance();
+        }
+
+        refillAndBalance() {
+            if (this.pool.length === 0) return;
+            
+            // Shuffle
+            let working = [...this.pool];
+            for (let i = working.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [working[i], working[j]] = [working[j], working[i]];
+            }
+
+            // Color Balance
+            const balanced = [];
+            while (working.length > 0) {
+                let matchIndex = -1;
+                
+                // Find a card that doesn't share color with previous
+                for (let i = 0; i < working.length; i++) {
+                    const candidate = working[i];
+                    const prev = balanced.length > 0 ? balanced[balanced.length - 1] : null;
+                    
+                    if (!prev || !this.shareColor(candidate, prev)) {
+                        matchIndex = i;
+                        break;
+                    }
+                }
+
+                if (matchIndex === -1) matchIndex = 0; // No match found, take first
+                balanced.push(working.splice(matchIndex, 1)[0]);
+            }
+            this.sequence = balanced;
+        }
+
+        shareColor(c1, c2) {
+            // Returns true if arrays share any element
+            return c1.colors.some(c => c2.colors.includes(c));
+        }
+
+        nextCards(count) {
+            const drawn = [];
+            for (let i = 0; i < count; i++) {
+                if (this.sequence.length === 0) this.refillAndBalance();
+                if (this.sequence.length > 0) drawn.push(this.sequence.shift());
+            }
+            return drawn;
+        }
+    }
+
+    async function startGeneration() {
+        const setCode = document.getElementById('setSelect').value;
+        const count = parseInt(document.getElementById('packCount').value);
+        const status = document.getElementById('status');
+        const output = document.getElementById('output');
+        const btn = document.getElementById('genBtn');
+
+        if (!setCode) return;
+
+        btn.disabled = true;
+        output.innerHTML = '';
+        status.textContent = `Fetching card data for ${setCode.toUpperCase()}...`;
+
+        try {
+            // If we haven't loaded this set yet, fetch it
+            if (currentSetCards.length === 0 || currentSetCards[0].set !== setCode) {
+                currentSetCards = await fetchAllCards(setCode);
+            }
+
+            status.textContent = "Analyzing collation data...";
+            
+            // Process Pools
+            const pools = { common: [], uncommon: [], rare: [], mythic: [], land: [] };
+            currentSetCards.forEach(c_data => {
+                const c = new Card(c_data);
+                // Tag raw data with set to check later
+                c.set = setCode; 
+                
+                if (c.typeLine.includes("Basic Land")) pools.land.push(c);
+                else if (pools[c.rarity]) pools[c.rarity].push(c);
+            });
+
+            if (pools.common.length === 0) {
+                throw new Error("This set contains no commons (likely not a booster set).");
+            }
+
+            // Init Runs
+            const runC = new PrintRun(pools.common);
+            const runU = new PrintRun(pools.uncommon);
+
+            // Generate
+            status.textContent = `Generating ${count} packs...`;
+            
+            for (let i = 1; i <= count; i++) {
+                const packCards = generatePack(runC, runU, pools);
+                renderPack(i, packCards, output);
+            }
+
+            status.textContent = "Done.";
+
+        } catch (err) {
+            status.textContent = `Error: ${err.message}`;
+            console.error(err);
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function fetchAllCards(setCode) {
+        let cards = [];
+        let url = `${API_ROOT}/cards/search?q=set:${setCode}+is:booster+unique:cards`;
+        
+        while (url) {
+            const resp = await fetch(url);
+            const json = await resp.json();
+            cards.push(...json.data);
+            
+            if (json.has_more) {
+                url = json.next_page;
+                // Tiny delay to be polite
+                await new Promise(r => setTimeout(r, 50)); 
+            } else {
+                url = null;
+            }
+        }
+        return cards;
+    }
+
+    function generatePack(runC, runU, pools) {
+        let pack = [];
+
+        // 1. Commons (7)
+        pack.push(...runC.nextCards(7).map(c => ({...c, isFoil: false})));
+
+        // 2. Uncommons (3)
+        pack.push(...runU.nextCards(3).map(c => ({...c, isFoil: false})));
+
+        // Helper: Get random excluding current pack
+        const getUnique = (pool) => {
+            const candidates = pool.filter(c => !pack.some(p => p.name === c.name));
+            return candidates.length ? candidates[Math.floor(Math.random() * candidates.length)] 
+                                     : pool[Math.floor(Math.random() * pool.length)];
+        };
+
+        // 3. Wildcard
+        const wRoll = Math.random();
+        let wPool;
+        if (wRoll < 0.50) wPool = pools.common;
+        else if (wRoll < 0.80) wPool = pools.uncommon;
+        else if (wRoll < 0.95) wPool = pools.rare;
+        else wPool = pools.mythic;
+        
+        if (wPool.length) pack.push({...getUnique(wPool), isFoil: false});
+
+        // 4. Rare/Mythic
+        if (pools.mythic.length && Math.random() < 0.125) {
+            pack.push({...getUnique(pools.mythic), isFoil: false});
+        } else {
+            pack.push({...getUnique(pools.rare), isFoil: false});
+        }
+
+        // 5. Foil (Wildcard rarity weights)
+        const fRoll = Math.random();
+        let fPool;
+        if (fRoll < 0.67) fPool = pools.common;
+        else if (fRoll < 0.92) fPool = pools.uncommon;
+        else if (fRoll < 0.99) fPool = pools.rare;
+        else fPool = pools.mythic;
+
+        if (fPool && fPool.length) {
+            const foilCard = fPool[Math.floor(Math.random() * fPool.length)];
+            pack.push({...foilCard, isFoil: true});
+        }
+
+        // 6. Land
+        if (pools.land.length) {
+            const land = pools.land[Math.floor(Math.random() * pools.land.length)];
+            pack.push({...land, isFoil: false});
+        }
+
+        return pack;
+    }
+
+    function renderPack(num, cards, container) {
+        // Sort: Mythic -> Rare -> Uncommon -> Common -> Land
+        const rarityVal = { 'mythic': 0, 'rare': 1, 'uncommon': 2, 'common': 3 };
+        
+        cards.sort((a, b) => {
+            const aL = a.typeLine.includes("Basic Land");
+            const bL = b.typeLine.includes("Basic Land");
+            if (aL && !bL) return 1;
+            if (!aL && bL) return -1;
+            return (rarityVal[a.rarity] || 3) - (rarityVal[b.rarity] || 3);
+        });
+
+        const packDiv = document.createElement('div');
+        packDiv.className = 'pack-container';
+        
+        let html = `<h3 class="pack-title">Pack #${num}</h3><div class="card-grid">`;
+        
+        cards.forEach(c => {
+            const foilClass = c.isFoil ? 'is-foil' : '';
+            html += `
+                <div class="card-wrapper ${foilClass}" title="${c.name} (${c.rarity})">
+                    <img src="${c.image}" class="card-img" loading="lazy" alt="${c.name}">
+                    <div class="foil-overlay"></div>
+                    <div class="card-name">${c.name}</div>
+                </div>
+            `;
+        });
+        
+        html += `</div>`;
+        packDiv.innerHTML = html;
+        container.appendChild(packDiv);
+    }
+</script>
+
+</body>
+</html>
